@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteMappingsManager">
+    <list>
+      <list>
+        <remote-mappings server-id="python@e5852b43-fc82-40ee-8df6-6e406d70e275" />
+        <remote-mappings server-id="python@sftp://sh@10.108.210.210:22/home/sh/anaconda3/envs/CT/bin/python3">
+          <settings>
+            <list>
+              <mapping local-root="$PROJECT_DIR$" remote-root="/home/sh/code/CT_torch" />
+            </list>
+          </settings>
+        </remote-mappings>
+      </list>
+    </list>
+  </component>
+</project>
