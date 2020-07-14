@@ -5,7 +5,7 @@ from tools.utils import setMapping, padData, cal_maxlen
 import copy
 import torch.nn.utils.rnn as rnn_utils
 import os
-from model.crf import CRF
+import model.crf as crf
 
 class ConceptTagger(nn.Module):
     def __init__(self, config, embedding, word2Idx, label2Idx, description):
@@ -21,13 +21,67 @@ class ConceptTagger(nn.Module):
         self.hidden_size1 = config.hidden_size1
         self.hidden_size2 = config.hidden_size2
 
-        self.embedding = nn.Embedding.from_pretrained(torch.from_numpy(embedding.astype(np.float32)), padding_idx=word2Idx['<PAD>'])
+
+        self.TokenEmbedding = nn.Embedding.from_pretrained(torch.from_numpy(embedding.astype(np.float32)), padding_idx=word2Idx['<PAD>'])
+
+        self.LabelEmbedding = ConceptTagger.BuildLabelEmbedding(embedding, word2Idx, label2Idx, description,
+
+                                                                        config.embedding_method, config.encoder_method,self.device)
+
         self.lstm1 = nn.LSTM(self.embed_size, self.hidden_size1, batch_first=True, bias=True, bidirectional=True)
         self.lstm2 = nn.LSTM(self.hidden_size1*2+self.embed_size, self.hidden_size2, batch_first=True, bias=True, bidirectional=True)
-        self.fc = nn.Linear(self.hidden_size2*2, 3, bias=True)
+        self.h_projection = nn.Linear(2 * self.hidden_size2,
+                                      self.LabelEmbedding.size(1),
+                                      bias=True)
         self.dropout = nn.Dropout(config.dropout)
         if self.use_crf:
-            self.crf = CRF(num_tags=3, batch_first=True)
+            self.crf = crf.CRF(labelEmbedding=self.LabelEmbedding, num_tags=self.LabelEmbedding.size(0),
+                               batch_first=True)
+
+    @staticmethod
+    def BuildLabelEmbedding(embedding, word2Idx, label2Idx, description,  embedding_method,
+                            encoder_method, device):
+        _I = np.array([1, 0, 0]).astype(np.float32)
+        _O = np.array([0, 1, 0]).astype(np.float32)
+        _B = np.array([0, 0, 1]).astype(np.float32)
+        embeddingDim = np.shape(embedding)[1]
+        Idx2label = {v: k for k, v in label2Idx.items()}
+        src_labels = [Idx2label[i] for i in range(len(Idx2label))]
+        labelembedding = []
+        if embedding_method == 'description':
+            slot2Id = {}
+            for label in src_labels:
+                if len(label) > 2 and label[1] == '-':
+                    slot = label[2:]
+                    descs = description[slot]
+                    if slot not in slot2Id:
+                        slot2Id[slot] = []
+                        for token in descs:
+                            slot2Id[slot].append(word2Idx[token])
+
+            if encoder_method == 'wordembedding':
+                for label in src_labels:
+                    if label == 'O':
+                        labelembedding.append(np.concatenate((_O, np.zeros(embeddingDim)), 0))
+                    else:
+                        v0 = None
+                        if label[0] == 'B':
+                            v0 = _B
+                        elif label[0] == 'I':
+                            v0 = _I
+                        else:
+                            v0 = _O
+                        temp = []
+                        for t in slot2Id[label[2:]]:
+                            temp.append(embedding[t])
+                        temp = sum(temp) / len(temp)
+                        labelembedding.append(np.concatenate((v0, temp), 0))
+
+        labelembedding = torch.tensor(labelembedding, dtype=torch.float32, device=device)
+        labelembedding.requires_grad = False
+        return labelembedding
+
+
 
     def Eval(self, x, slot):
         _x = copy.deepcopy(x)
@@ -88,6 +142,10 @@ class ConceptTagger(nn.Module):
         _x = copy.deepcopy(x)
         _y = copy.deepcopy(y)
         _slot = copy.deepcopy(slot)
+
+
+
+
         x = setMapping(x, self.word2Idx)
         lengths = [len(i) for i in x]
         y = setMapping(y, self.label2Idx)
@@ -97,17 +155,17 @@ class ConceptTagger(nn.Module):
 
         slot_len = [len(i) for i in slot]
 
-        x = padData(x, cal_maxlen(x), self.word2Idx['<PAD>'])
-        y = padData(y, cal_maxlen(y), self.label2Idx['O'])
-        slot = padData(slot, cal_maxlen(slot), self.word2Idx['<PAD>'])
+        x = padData(x,  self.word2Idx['<PAD>'])
+        y = padData(y,  self.label2Idx['O'])
+        slot = padData(slot, self.word2Idx['<PAD>'])
         x = torch.tensor(x, device=self.device)
         y = torch.tensor(y, device=self.device)
         mask = (x != self.word2Idx['<PAD>']).byte()
         mask.to(self.device)
         slot = torch.tensor(slot, device=self.device)
         slot_len = torch.tensor(slot_len, device=self.device)
-        x = self.embedding(x)
-        slot = self.embedding(slot)
+        x = self.TokenEmbedding(x)
+        slot = self.TokenEmbedding(slot)
         packed = rnn_utils.pack_padded_sequence(input=x, lengths=lengths, batch_first=True, enforce_sorted=False)
         enc_hiddens, (last_hidden, last_cell) = self.lstm1(packed)
         x = rnn_utils.pad_packed_sequence(enc_hiddens, batch_first=True)[0]
@@ -123,43 +181,33 @@ class ConceptTagger(nn.Module):
         enc_hiddens, (last_hidden, last_cell) = self.lstm2(packed)
         x = rnn_utils.pad_packed_sequence(enc_hiddens, batch_first=True)[0]
         x = self.dropout(x)
-        x = self.fc(x)
-
-
-
+        x = self.h_projection(x)
+        y_hat = torch.matmul(x, self.LabelEmbedding.transpose(0, 1))
 
         if Type == 'train':
             if not self.use_crf:
-                featas = x.view(x.size(0) * x.size(1), -1)
-                y = y.view(-1)
+                batch_size, max_len = y_hat.size(0), y_hat.size(1)
+                feats = y_hat.view(batch_size * max_len, -1)
+                tags = y.view(-1)
                 loss_func = nn.CrossEntropyLoss(size_average=True)
-                loss = loss_func(featas, y)
+                loss = loss_func(feats, tags)
                 return loss
             else:
-                loss = -self.crf(x, y, mask, 'mean')
+
+                loss = -self.crf(y_hat, y, mask, 'mean')
                 return loss
-        else:
+        elif Type == 'test':
             y_pad = None
             if not self.use_crf:
-                y_pad = x.argmax(-1).detach().tolist()
+                y_pad = y_hat.argmax(-1).detach().tolist()
             else:
-                y_pad = self.crf.decode(x, mask)
+                y_pad = self.crf.decode(y_hat, mask)
             pred = []
             id2label = {v: k for k, v in self.label2Idx.items()}
             for i in range(len(y_pad)):
                 for j in range(len(y_pad[i])):
                     y_pad[i][j] = id2label[y_pad[i][j]]
                 pred.append(y_pad[i][:lengths[i]])
-            assert len(_slot) == len(_y) and len(_x) == len(_y)
-            for i in range(len(_x)):
-                for j in range(len(_y[i])):
-                    if _y[i][j] != 'O':
-                        _y[i][j] = _y[i][j] + '-' + _slot[i][0]
-            for i in range(len(pred)):
-                for j in range(len(pred[i])):
-                    if pred[i][j] != 'O':
-                        pred[i][j] = pred[i][j] + '-' + _slot[i][0]
-
             return _x, _y, pred
 
     @staticmethod

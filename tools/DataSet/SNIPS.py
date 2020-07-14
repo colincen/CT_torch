@@ -13,9 +13,9 @@ class snips:
         self.train, train_slots = self.prepareSentencesByIntent('train.txt')
         self.dev, dev_slots = self.prepareSentencesByIntent('dev.txt')
         self.test,test_slots = self.prepareSentencesByIntent('test.txt')
-        # print(self.train['PlayMusic'][0:2])
+        self.mergeSlot()
         self.description = self.getDescription(desc_path)
-        # self.exemplar = self.getExemplar()
+
         if not cross_domain:
             self.source['train'] = self.train[target_domain]
             self.source['dev'] = self.dev[target_domain]
@@ -24,10 +24,30 @@ class snips:
             self.target['test'] = self.test[target_domain] + self.train[target_domain] + self.dev[target_domain]
             for k, v in self.train.items():
                 if k != target_domain:
-                    self.source['train'] += self.addNegativeSample(self.train[k])
-                    self.source['dev'] += self.addNegativeSample(self.dev[k])
-                    self.source['test'] += self.addNegativeSample(self.test[k])
+                    self.source['train'] += self.train[k]
+                    self.source['dev'] += self.dev[k]
+                    self.source['test'] += self.test[k]
         self.data = {'source': self.source, 'target': self.target, 'description': self.description}
+
+
+    def mergeSlot(self):
+        slots = {}
+        dd = [self.train, self.dev, self.test]
+        for d in dd:
+            for k,v in d.items():
+                slots[k] = set()
+                for i in range(len(v)):
+                    for w in v[i]['slot']:
+                        slots[k].add(w)
+            for k in slots.keys():
+                t = list(slots[k])
+                slots[k] = t
+
+            for k,v in d.items():
+                for i in range(len(d[k])):
+                    d[k][i]['slot'] = slots[k]
+
+
 
     def addNegativeSample(self, da, ratio=1):
         slots = self.description.keys()
@@ -121,6 +141,7 @@ class snips:
         for label in labelSet:
             tempDict = {'tokens': sent,
                         'NER_BIO': [lab[:1] if len(lab) > 1 and lab[2:] == label else 'O' for lab in labels],
+                        'Raw_labels' : labels,
                         'slot': [label]}
             res.append(tempDict)
 

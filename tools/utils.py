@@ -13,7 +13,8 @@ import tools.DataSet.SNIPS as SNIPS
 def cal_maxlen(data):
     return max([len(x) for x in data])
 
-def padData(data, max_len, padding_idx):
+def padData(data,  padding_idx):
+    max_len = cal_maxlen(data)
     padded = []
     for i in range(len(data)):
         temp = []
@@ -58,6 +59,14 @@ def ExtractLabelsFromTokens(data):
 
     return Labels
 
+def ExtractLabelsFromTokens2(data):
+    Labels = {}
+    for row in data:
+        for token in row['Raw_labels']:
+            if token not in Labels:
+                Labels[token] = len(Labels)
+
+    return Labels
 
 def readTokenEmbeddings(embeddingsPath):
     if not op.isfile(embeddingsPath):
@@ -129,7 +138,7 @@ def data_generator(data, batch_size):
         x_ids = index[i * batch_size:min(len(index), (i + 1) * batch_size)]
         for j in x_ids:
             x.append(data[j]['tokens'])
-            y.append(data[j]['NER_BIO'])
+            y.append(data[j]['Raw_labels'])
             slots.append(data[j]['slot'])
         yield x, y, slots
 

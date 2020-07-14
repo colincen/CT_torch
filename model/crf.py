@@ -1,4 +1,6 @@
 import sys
+
+sys.path.append('/home/aistudio/external-libraries')
 from typing import List, Optional
 
 import torch
@@ -28,17 +30,22 @@ class CRF(nn.Module):
     .. _Viterbi algorithm: https://en.wikipedia.org/wiki/Viterbi_algorithm
     """
 
-    def __init__(self, num_tags: int, batch_first: bool = False) -> None:
+    def __init__(self, labelEmbedding, num_tags: int, batch_first: bool = False) -> None:
         if num_tags <= 0:
             raise ValueError(f'invalid number of tags: {num_tags}')
         super().__init__()
         self.num_tags = num_tags
         self.batch_first = batch_first
-        self.start_transitions = nn.Parameter(torch.empty(num_tags))
-        self.end_transitions = nn.Parameter(torch.empty(num_tags))
-        self.transitions = nn.Parameter(torch.empty(num_tags, num_tags))
-
+        self.start_transitions = nn.Parameter(torch.empty(labelEmbedding.size(1)))
+        self.end_transitions = nn.Parameter(torch.empty(labelEmbedding.size(1)))
+        self.transitions = nn.Parameter(torch.empty(labelEmbedding.size(1), labelEmbedding.size(1)))
+        self.labelembedding = CRF.buildCRFLabelEmbedding(labelEmbedding)
         self.reset_parameters()
+
+
+    @staticmethod
+    def buildCRFLabelEmbedding(embedding):
+        return nn.Embedding.from_pretrained(embedding)
 
     def reset_parameters(self) -> None:
         """Initialize the transition parameters.
@@ -77,6 +84,7 @@ class CRF(nn.Module):
             `~torch.Tensor`: The log likelihood. This will have size ``(batch_size,)`` if
             reduction is ``none``, ``()`` otherwise.
         """
+
         self._validate(emissions, tags=tags, mask=mask)
         if reduction not in ('none', 'sum', 'mean', 'token_mean'):
             raise ValueError(f'invalid reduction: {reduction}')
@@ -116,6 +124,7 @@ class CRF(nn.Module):
         Returns:
             List of list containing the best tag sequence for each batch.
         """
+
         self._validate(emissions, mask=mask)
         if mask is None:
             mask = emissions.new_ones(emissions.shape[:2], dtype=torch.uint8)
@@ -171,13 +180,22 @@ class CRF(nn.Module):
 
         # Start transition score and first emission
         # shape: (batch_size,)
-        score = self.start_transitions[tags[0]]
+
+        emb_t = torch.transpose(self.labelembedding(tags[0]), 0, 1)
+        score = torch.matmul(torch.matmul(self.start_transitions, self.transitions), emb_t)
         score += emissions[0, torch.arange(batch_size), tags[0]]
 
         for i in range(1, seq_length):
             # Transition score to next tag, only added if next timestep is valid (mask == 1)
             # shape: (batch_size,)
-            score += self.transitions[tags[i - 1], tags[i]] * mask[i]
+            emb_t0 = self.labelembedding(tags[i - 1])
+            emb_t1 = self.labelembedding(tags[i])
+            # print(emb_t0.size())
+            # print(emb_t1.size())
+            temp = torch.matmul(emb_t0, self.transitions)
+            temp = torch.bmm(emb_t1.unsqueeze(1), temp.unsqueeze(-1)).squeeze()
+
+            score += temp * mask[i]
 
             # Emission score for next tag, only added if next timestep is valid (mask == 1)
             # shape: (batch_size,)
@@ -185,12 +203,13 @@ class CRF(nn.Module):
 
         # End transition score
         # shape: (batch_size,)
+
         seq_ends = mask.long().sum(dim=0) - 1
         # shape: (batch_size,)
         last_tags = tags[seq_ends, torch.arange(batch_size)]
         # shape: (batch_size,)
-        score += self.end_transitions[last_tags]
-
+        emb_t = self.labelembedding(last_tags)
+        score += torch.matmul(torch.matmul(emb_t, self.transitions), self.end_transitions)
         return score
 
     def _compute_normalizer(
@@ -208,7 +227,16 @@ class CRF(nn.Module):
         # (batch_size, num_tags) where for each batch, the j-th column stores
         # the score that the first timestep has tag j
         # shape: (batch_size, num_tags)
-        score = self.start_transitions + emissions[0]
+
+        temp1 = torch.matmul(self.start_transitions, self.transitions)
+        temp2 = torch.transpose(self.labelembedding.weight, 0, 1)
+        temp = torch.matmul(temp1, temp2).squeeze()
+
+        score = temp + emissions[0]
+
+        trans = torch.matmul(torch.matmul(self.labelembedding.weight, self.transitions),
+                             torch.transpose(self.labelembedding.weight, 0, 1))
+        # print(trans.size())
 
         for i in range(1, seq_length):
             # Broadcast score for every possible next tag
@@ -224,7 +252,8 @@ class CRF(nn.Module):
             # possible tag sequences so far that end with transitioning from tag i to tag j
             # and emitting
             # shape: (batch_size, num_tags, num_tags)
-            next_score = broadcast_score + self.transitions + broadcast_emissions
+
+            next_score = broadcast_score + trans + broadcast_emissions
 
             # Sum over all possible current tags, but we're in score space, so a sum
             # becomes a log-sum-exp: for each sample, entry i stores the sum of scores of
@@ -238,7 +267,9 @@ class CRF(nn.Module):
 
         # End transition score
         # shape: (batch_size, num_tags)
-        score += self.end_transitions
+        temp1 = torch.matmul(self.labelembedding.weight, self.transitions)
+        temp = torch.matmul(temp1, self.end_transitions).squeeze()
+        score += temp
 
         # Sum (log-sum-exp) over all possible tags
         # shape: (batch_size,)
@@ -257,9 +288,14 @@ class CRF(nn.Module):
 
         # Start transition and first emission
         # shape: (batch_size, num_tags)
-        score = self.start_transitions + emissions[0]
-        history = []
+        temp1 = torch.matmul(self.start_transitions, self.transitions)
+        temp2 = torch.transpose(self.labelembedding.weight, 0, 1)
+        temp = torch.matmul(temp1, temp2).squeeze()
 
+        score = temp + emissions[0]
+        history = []
+        trans = torch.matmul(torch.matmul(self.labelembedding.weight, self.transitions),
+                             torch.transpose(self.labelembedding.weight, 0, 1))
         # score is a tensor of size (batch_size, num_tags) where for every batch,
         # value at column j stores the score of the best tag sequence so far that ends
         # with tag j
@@ -281,7 +317,7 @@ class CRF(nn.Module):
             # for each sample, entry at row i and column j stores the score of the best
             # tag sequence so far that ends with transitioning from tag i to tag j and emitting
             # shape: (batch_size, num_tags, num_tags)
-            next_score = broadcast_score + self.transitions + broadcast_emission
+            next_score = broadcast_score + trans + broadcast_emission
 
             # Find the maximum score over all possible current tag
             # shape: (batch_size, num_tags)
@@ -295,7 +331,9 @@ class CRF(nn.Module):
 
         # End transition score
         # shape: (batch_size, num_tags)
-        score += self.end_transitions
+        temp1 = torch.matmul(self.labelembedding.weight, self.transitions)
+        temp = torch.matmul(temp1, self.end_transitions).squeeze()
+        score += temp
 
         # Now, compute the best path for each sample
 
@@ -320,8 +358,6 @@ class CRF(nn.Module):
             best_tags_list.append(best_tags)
 
         return best_tags_list
-
-
 
 # w = CRF(5,True)
 # print(w)

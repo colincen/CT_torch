@@ -1,7 +1,7 @@
 import argparse
 import math
 from model.concept_tagger import ConceptTagger
-from tools.utils import getNERdata, readTokenEmbeddings, data_generator,  ExtractLabelsFromTokens
+from tools.utils import getNERdata, readTokenEmbeddings, data_generator,  ExtractLabelsFromTokens, ExtractLabelsFromTokens2
 from tools.Log import Logger
 import tools.conlleval as conlleval
 import torch
@@ -31,6 +31,10 @@ def model_config():
     net_arg.add_argument("--bidirectional", type=bool, default=True)
     net_arg.add_argument("--dropout", type=float, default=0.5)
     net_arg.add_argument("--crf", type=bool, default=True)
+    net_arg.add_argument("--embedding_method", type=str, default='description',
+                         choices=['description', 'atom', 'exemplar'])
+    net_arg.add_argument("--encoder_method", type=str, default='wordembedding',
+                         choices=['wordembedding', 'bilstm', 'cnn'])
 
     # Training
     train_arg = parser.add_argument_group("Training")
@@ -43,7 +47,7 @@ def model_config():
     train_arg.add_argument("--max_num_trial", type=int, default=5)
     train_arg.add_argument("--lr_decay", type=float, default=0.5)
     train_arg.add_argument("--learning_rate", type=float, default=0.001)
-    train_arg.add_argument("--run_type", type=str, default='train')
+    train_arg.add_argument("--run_type", type=str, default='test')
 
     # MISC
     misc_arg = parser.add_argument_group("Misc")
@@ -92,7 +96,7 @@ def train(config):
                           target_domain=config.target_domain)
 
     emb, word2Idx = readTokenEmbeddings(config.embed_file)
-    label2Idx = {'I':0,'O':1,'B':2}
+    label2Idx = ExtractLabelsFromTokens2(dataDict['source']['train'])
 
 
     max_batch_size = math.ceil(len(dataDict['source']['train']) / config.batch_size)
@@ -206,7 +210,15 @@ def cross_domain(model_path, device='cpu'):
                           cross_domain=config.cross_domain,
                           target_domain=config.target_domain)
 
+    tgt_label2Idx = ExtractLabelsFromTokens2(dataDict['target']['test'])
+    model.label2Idx = tgt_label2Idx
+    model.LabelEmbedding = ConceptTagger.BuildLabelEmbedding(model.emb, model.word2Idx, tgt_label2Idx,
+                                                                     model.description, 'description',
+                                                                     'wordembedding', device)
 
+    if config.crf:
+        model.crf.labelembedding = model.crf.buildCRFLabelEmbedding(model.LabelEmbedding)
+        model.crf.num_tags = model.LabelEmbedding.size(0)
 
     model.to(device)
     test_metric_pre, test_metric_rec, test_metric_f1 = evaluate(model, dataDict['target']['test'], config.batch_size, log)

@@ -17,13 +17,13 @@ do
 	--learning_rate 0.001 \
 	--batch_size 16 \
 	--description_path data/snips_slot_description.txt \
-	--save_dir data1/ --embed_file /home/sh/data/komninos_english_embeddings.gz \
+	--save_dir data_sum_slot/ --embed_file /home/sh/data/komninos_english_embeddings.gz \
 	--run_type train \
 	--target_domain ${intent[$i]} \
 	--device cuda:0
 	
 	python -u network.py --run_type test \
-	--save_dir data1/ \
+	--save_dir data_sum_slot/ \
 	--target_domain ${intent[$i]} \
 	--device cuda:0
 done
